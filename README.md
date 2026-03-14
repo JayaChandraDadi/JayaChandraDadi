@@ -14,7 +14,7 @@ I'm a data-driven and backend-focused developer passionate about solving real-wo
 
 ## 💼 Experience
 
-### 🔹 AI/ML Backend Engineering Intern @ Marketeq Digital
+### 🔹Software Engineer Intern @ Marketeq Digital
 - Built and scaled backend microservices using **NestJS**, **Python**, and **PostgreSQL**.
 - Designed secure auth systems, optimized SQL queries, and integrated OpenAI/HuggingFace APIs.
 - Developed ML-based matching logic using vector embeddings and scoring algorithms.
