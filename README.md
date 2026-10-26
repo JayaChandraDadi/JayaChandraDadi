@@ -1,131 +1,126 @@
 # Hi, I'm Jaya Chandra Dadi 👋
 
-## Backend Software Engineer · Java · Distributed Systems · AWS
+## GPU Computing · LLM Inference · AI Systems
 
-I build customer-facing backend services in **Java** and **Python**: services that keep working when networks drop, devices disagree, messages arrive twice and dependencies go down. I care about **correctness under concurrency**, **testability** and **operational excellence**, and I prove every claim with tests and benchmarks I can rerun.
+I work on the layer between a trained model and a fast, reliable service: **CUDA C++ kernels** for decoding, **vLLM** serving and scheduling, and **KV-cache** reuse. I profile before I tune, measure against the strongest baseline available (cuBLAS, FlashInfer, vLLM's own backends), and publish a number only once a rerunnable benchmark has produced it.
 
-I hold an **M.S. in Data Science (Computer Science and Applied Mathematics) from Stony Brook University**. My most recent work is a set of four connected services for **long-form audio**: keeping a listener's place in sync across devices, getting narrated audio from creators to streaming, assembling the app's home screen, and an LLM companion that never spoils the story.
+I hold an **M.S. in Data Science (Computer Science and Applied Mathematics) from Stony Brook University**. My recent work covers three levels of the inference stack: the kernels a decode step runs on, the router that decides which GPU replica serves a request, and reusing a small model's KV cache so a large model can skip most of its prefill.
 
 📍 Houston, Texas  
-📧 [jayachandradadi2003@gmail.com](mailto:jayachandradadi2003@gmail.com)  
-🔗 [LinkedIn](https://www.linkedin.com/in/jaya-chandra-dadi-0abab6278)
+📧 [jayachandra.dadi@gmail.com](mailto:jayachandra.dadi@gmail.com)  
+🔗 [LinkedIn](https://www.linkedin.com/in/jaya-chandra-dadi-0abab6278) · [LeetCode](https://leetcode.com/u/JayaChandraDadi)
 
 ---
 
-## Featured: services for long-form listening
+## Featured: across the LLM inference stack
 
-Each project stands alone, runs on a laptop with no cloud account, ships with CI and benchmark reports, and they fit together like this:
+Each project stands on its own, comes with tests and CI, and states plainly what has been measured and what hasn't. Here is where each one sits in the inference stack:
 
 ```mermaid
 flowchart LR
-    CR[Creator uploads chapters] --> CF[ChapterForge<br/>ingest, QC, master, HLS]
-    CF --> ST[(Streaming renditions)]
-    ST --> D[Phone, car, speaker, web]
-    D -- "position reports" --> SP[SyncPoint<br/>cross-device position sync]
-    SP -- "where you are" --> MQ[Marquee<br/>server-driven home screen]
-    SP -- "what you have heard" --> EM[Earmark<br/>spoiler-safe companion]
-    MQ --> D
-    EM --> D
+    C[Clients<br/>chat and agents] --> KR[KVRoute<br/>cache-aware router]
+    KR --> R1[vLLM replica]
+    KR --> R2[vLLM replica]
+    KR --> R3[vLLM replica]
+    R1 --> DK[DecodeKernels<br/>paged attention, GEMM,<br/>RMSNorm, SwiGLU]
+    R2 --> DK
+    R3 --> DK
+    SM[Small model prefill] --> HK[HandoffKV<br/>KV-cache mapping +<br/>selective recompute]
+    HK --> LM[Large model decode]
 ```
 
-| Project | What it does | Stack | Measured |
+| Project | What it does | Stack | Status |
 |---|---|---|---|
-| [**SyncPoint**](https://github.com/JayaChandraDadi/syncpoint) | Keeps a listener's playback position consistent across devices | Java 21, Spring Boot, DynamoDB, SNS/SQS, AWS CDK | 0 oracle mismatches in 2,000 randomized concurrent scenarios and 23K load-test requests |
-| [**ChapterForge**](https://github.com/JayaChandraDadi/chapterforge) | Ingests narrated chapters, checks them against submission specs, masters and encodes them for streaming | Java 21, Spring Boot, S3, SQS, PostgreSQL, FFmpeg | 192/192 seeded-defect chapters classified exactly; 24/24 correct under injected crashes; 39x real time |
-| [**Marquee**](https://github.com/JayaChandraDadi/marquee) | Server-driven UI: GraphQL screens for iOS, Android and web assembled from parallel downstream calls | Java 21, Spring Boot, GraphQL, DynamoDB, Redis | p99 583 → 182 ms at 4.2x throughput; p99 under 165 ms through outages |
-| [**Earmark**](https://github.com/JayaChandraDadi/earmark) | Answers questions about a book using only what the listener has already heard | Python, FastAPI, Whisper, SQLite FTS5, ONNX, MCP | Spoiler bound never ran ahead across 2,000 random instants; 48 tests |
+| [**DecodeKernels**](https://github.com/JayaChandraDadi/DecodeKernels) | CUDA kernels for the LLM decode step, wired into vLLM as custom ops | CUDA C++, PyTorch C++ extensions, Nsight Compute, vLLM | 102 kernel instantiations compile for sm_80/89/90 with 0 register spills; GPU benchmarks vs cuBLAS and FlashInfer in progress |
+| [**KVRoute**](https://github.com/JayaChandraDadi/KVRoute) | Routes each request to the vLLM replica that balances prefix-cache hits against load | Python, aiohttp, vLLM, Docker, Prometheus, Grafana | Simulated 4-replica agent workload vs round-robin: median TTFT 0.173 → 0.064 s, hit rate 66% → 81%, 1276 → 1500 tok/s; GPU runs in progress |
+| [**HandoffKV**](https://github.com/JayaChandraDadi/handoffkv) | Converts a small model's KV cache for a larger model and recomputes only the tokens that matter | Python, PyTorch, OpenAI Triton, Hugging Face | Triton sparse-causal kernel does 0.45–0.56x the work of dense attention at 4K context; 45 correctness tests |
 
-### [SyncPoint](https://github.com/JayaChandraDadi/syncpoint) · Cross-device listening-position sync
+### [DecodeKernels](https://github.com/JayaChandraDadi/DecodeKernels) · CUDA kernels for LLM decoding
 
-A listener's place in a 12-hour book has to survive phones going offline, retries on flaky networks, a car whose clock is an hour off, and a rewind on one device racing a report from another.
+Decode is memory-bound: each new token rereads the whole KV cache and every weight matrix. These kernels go after that cost directly, and they plug into a real serving engine.
 
-* Deterministic conflict resolution with a total order, so every arrival order of the same reports converges to the same state, plus **clock-skew correction** and **idempotent** retries.
-* **Optimistic concurrency** with DynamoDB conditional writes: no locks, no transactions; the furthest point reached is kept separately, so progress is never lost.
-* Changes fan out through **SNS** to per-instance **SQS** queues and are pushed to the listener's other devices over server-sent events.
-* Verified against a sequential oracle in **2,000 randomized concurrent scenarios** (about 389K deliveries per run) and **23K load-test requests**, with **0 mismatches**. Infrastructure as code with **AWS CDK** (ECS Fargate, autoscaling, CloudWatch alarms).
+* **Paged-attention decode** over vLLM's KV cache in place. Each block is GQA-aware, so one block owns a KV head and serves its whole query group. That way each K/V row is read from HBM once per group instead of once per query head.
+* **Flash-decoding split-K** for long contexts. Each 512-token partition writes its partial output plus its max logit and exp-sum. A reduce kernel then merges the partitions with a log-sum-exp rescale. Short batches take a single-pass path.
+* A **tensor-core GEMM** (WMMA) with `cp.async` double buffering, plus a skinny tile for decode-sized batches.
+* Fused **RMSNorm**, **residual-add + RMSNorm** and **SiLU-and-mul**. They use warp-level reductions and match vLLM's op signatures.
+* Registered through `torch.library`, with fake kernels for `torch.compile`. A **vLLM plugin** swaps them into the FlashAttention decode path. Parity scripts check them against vLLM's default backend, and end-to-end throughput scripts measure the same model.
+* A CI compile check runs ptxas for sm_80/89/90 without a GPU. CPU reference tests cover the split-K merge math. CUDA-event benchmarks and Nsight Compute scripts run against **cuBLAS** and **FlashInfer**.
 
-`Java 21` `Spring Boot` `DynamoDB` `SNS` `SQS` `Server-Sent Events` `AWS CDK` `ECS Fargate` `CloudWatch` `JUnit`
-
----
-
-### [ChapterForge](https://github.com/JayaChandraDadi/chapterforge) · Audiobook ingestion and quality-control pipeline
-
-Most audiobook rejections are technical: too quiet, clipped peaks, a noisy room, missing room tone. ChapterForge measures every chapter, fixes what a machine can fix safely, and tells the creator exactly what to fix otherwise.
-
-* Uploads land in **S3** under content-addressed keys, jobs go on **SQS**, and **PostgreSQL** tracks every chapter through validate → master → encode → publish.
-* A streaming level meter checks loudness, peaks, noise floor and room tone against submission specs; safe fixes (gain, limiting, trimming, re-encoding) are automatic, and anything that would make the recording worse is refused with a fix-it report.
-* **Exactly-once publishing on an at-least-once queue**: versioned leases, fencing tokens, heartbeats, retries with backoff, a dead-letter queue and a reconciler.
-* **192/192** seeded-defect chapters classified exactly with **0 false positives** at **166x real time**; **24/24** chapters ended correctly under injected crashes and duplicate messages, at **39x real time**; multi-bitrate **AAC HLS** output via **FFmpeg**.
-
-`Java 21` `Spring Boot` `S3` `SQS` `PostgreSQL` `Flyway` `FFmpeg` `HLS` `Micrometer`
+`CUDA C++` `WMMA` `cp.async` `PyTorch C++ Extensions` `torch.library` `vLLM` `FlashInfer` `cuBLAS` `Nsight Compute`
 
 ---
 
-### [Marquee](https://github.com/JayaChandraDadi/marquee) · Server-driven UI aggregation service
+### [KVRoute](https://github.com/JayaChandraDadi/KVRoute) · Cache-aware request router for vLLM replicas
 
-Home screens mix services that fail independently, and old app versions stay in use for months. Marquee moves screen composition to the server.
+With several vLLM replicas, the choice of replica decides whether a prompt's prefix (system prompt, chat history, agent tool schemas) is already cached. Pile every request onto the replica that has the prefix and it overloads. Spread requests evenly and they all miss the cache.
 
-* Assembles home and library screens as typed component trees for **iOS, Android and web** through one **GraphQL** API, and adapts each component to the newest version the requesting app can draw.
-* Fans out to catalog, progress and recommendation services in parallel on virtual threads under a single screen deadline, with per-dependency timeouts, **circuit breakers**, and fallbacks to each listener's last good copy or a shared editorial shelf.
-* Layouts are data in **DynamoDB**, published with optimistic versioning and no app release; sticky **A/B test** assignments use hash bucketing plus conditional writes; **Redis** caches layouts, shared shelves and title metadata and fails open.
-* Versus a sequential aggregator: **p99 583 → 182 ms at 4.2x throughput**, and **p99 under 165 ms** through a slow tail, a full outage, a 2-second dependency and a Redis outage (2.4 s for the baseline). Caching cut catalog calls per screen by **85%**.
+* An OpenAI-compatible **aiohttp** proxy with streaming passthrough, failover and per-request attribution headers.
+* A router-side **prefix index**. It hashes 16-token blocks in a chain, the same way vLLM does, and keeps one LRU index per replica sized from that replica's `num_gpu_blocks`.
+* Five routing policies:
+  * round-robin
+  * least-load
+  * prefix affinity
+  * weighted linear
+  * **LMetric** (OSDI '26): new prefill tokens × batch size, lowest score wins, with no weights to tune.
+* **Trace replay** of multi-turn chat and agent workloads. It reports TTFT p50/p99, end-to-end p99, time per output token, throughput, and both the router's estimated hit rate and the replicas' measured one.
+* **Prometheus** metrics, scraped from vLLM and the router: queue depth, KV-cache usage and hit rate. A provisioned **Grafana** dashboard shows them, and Docker Compose brings up 4 GPU replicas (or 4 on one GPU).
+* Simulated replicas use a cost model, not GPU timings. In that simulation LMetric had the best median TTFT, end-to-end p99 and throughput. Every cache-aware policy had a worse TTFT p99 than round-robin, and the README reports that too.
 
-`Java 21` `Spring Boot` `GraphQL` `DynamoDB` `Redis` `Resilience4j` `Virtual Threads` `Prometheus`
+`Python` `aiohttp` `vLLM` `Prefix Caching` `Docker Compose` `NVIDIA Container Toolkit` `Prometheus` `Grafana` `pytest`
 
 ---
 
-### [Earmark](https://github.com/JayaChandraDadi/earmark) · Spoiler-safe listening companion
+### [HandoffKV](https://github.com/JayaChandraDadi/handoffkv) · Cross-model KV-cache reuse
 
-Ask "who is this character again?" halfway through a book and get an answer that only uses what you have already heard.
+A reimplementation of RaReCache: a small model does the prefill, and the large model reuses that work instead of starting from scratch.
 
-* Maps the listener's SyncPoint position to the exact text heard by aligning **Whisper** word timestamps to the book; the spoiler bound never runs ahead of the narrator (verified across 2,000 random instants).
-* Position-bounded **hybrid search** (BM25 on SQLite FTS5 + dense embeddings, fused with reciprocal-rank fusion) that never returns text past the bound.
-* A guard rejects **LLM** answers that name characters the listener has not reached yet, and falls back to an extractive answer that is spoiler-free by construction.
-* Conversational discovery over the LibriVox catalog ("a short gothic novel for a 6-hour flight"), served through **FastAPI** and an **MCP server**; 48 tests in CI.
+* A fitted linear map converts the small model's **KV cache** into the large model's layout. **Rank-disagreement scoring** then picks which tokens the large model must recompute.
+* A fused **Triton** sparse-causal attention kernel skips masked query-key blocks. At 4K context it does **0.45–0.56x** the work of dense attention, verified for MHA, GQA, MQA and FP16.
+* **45** correctness tests. They include partial prefill matching a full prefill to 1e-4, and padded-batch equivalence across Qwen3 and Llama layouts.
 
-`Python` `FastAPI` `Whisper` `SQLite FTS5` `ONNX` `Embeddings` `RAG` `MCP` `pytest`
+`Python` `PyTorch` `OpenAI Triton` `Hugging Face Transformers` `KV Cache` `GQA`
 
 ---
 
 ## Experience
 
-* **Open Source Contributor, vLLM** (Sep 2026 – present): exploring the vLLM inference engine (request scheduling, KV-cache management, model execution) and investigating gaps in testing and reliability, aiming to contribute fixes and regression tests.
-* **Research Assistant (Visiting Scholar), Stony Brook University** (Aug 2026 – present): an LLM-powered retrieval system over 500K+ documents, an automated evaluation pipeline that catches regressions on every change, and Spark/Dask data processing.
-* **AI/ML Backend Engineering Intern, Marketeq Digital** (May – Aug 2025): backend microservices and REST APIs on PostgreSQL, Redis and Kafka serving 50K+ daily requests, shipped on Docker and Kubernetes with CI/CD.
+* **Research Assistant, GPU Computing and AI Systems, Stony Brook University** (Aug 2026 – present):
+  * Runs a **vLLM** serving stack on NVIDIA GPUs for LLM agents and for retrieval over 500K+ documents.
+  * Runs **multi-GPU tensor-parallel** inference with NCCL and compares AWQ and FP8 checkpoints.
+  * Profiles prefill and decode with **Nsight Systems**.
+  * Maintains an inference evaluation pipeline that tracks quality, TTFT, tokens/s and GPU memory.
+* **ML Systems Engineering Intern, Marketeq Digital** (May – Aug 2025):
+  * Built PyTorch **inference services** behind REST and gRPC that handled 50K+ daily requests.
+  * Added dynamic batching, mixed precision and result caching on GPU workers.
+  * Deployed with **Docker** and the NVIDIA Container Toolkit on **Kubernetes** GPU nodes.
 
 ---
 
 ## Technical Skills
 
 **Languages**  
-`Java` `Python` `TypeScript` `JavaScript` `SQL` `Go` `C++`
+`C++` `C` `Python` `CUDA` `SQL` `Bash`
 
-**Backend and APIs**  
-`Spring Boot` `REST APIs` `GraphQL` `FastAPI` `NestJS` `gRPC` `Server-Sent Events` `Microservices`
+**GPU and AI Computing**  
+`CUDA C++` `OpenAI Triton` `PyTorch` `vLLM` `TensorRT-LLM` `NCCL` `FlashInfer` `LLM Inference`
 
-**Cloud and Infrastructure**  
-`AWS` `DynamoDB` `S3` `SQS` `SNS` `ECS Fargate` `AWS CDK` `CloudWatch` `Azure` `Docker` `Kubernetes` `GitHub Actions`
+**Inference Optimization**  
+`Paged KV Cache` `Continuous Batching` `Prefix Caching` `AWQ` `FP8 Quantization` `Speculative Decoding` `Tensor Parallelism`
 
-**Databases and Messaging**  
-`DynamoDB` `PostgreSQL` `MySQL` `Redis` `SQLite` `Kafka` `SQS/SNS` `Spark` `Dask`
+**Systems and Infrastructure**  
+`Linux` `Docker` `Kubernetes` `NVIDIA Container Toolkit` `FastAPI` `gRPC` `Redis` `Kafka` `Git` `GitHub Actions`
 
-**Media**  
-`FFmpeg` `HLS` `AAC` `Whisper`
-
-**AI and Search**  
-`RAG` `LLM Evaluation` `Embeddings` `Hybrid Search (BM25 + vector)` `MCP` `LangChain` `LangGraph` `vLLM`
-
-**Engineering Practices**  
-`JUnit` `pytest` `Load Testing` `Fault Injection` `Code Review` `Prometheus` `CloudWatch Alarms` `CI/CD` `Agile`
+**Performance and Debugging**  
+`Nsight Systems` `Nsight Compute` `PyTorch Profiler` `CUDA Events` `Prometheus` `Grafana` `GDB`
 
 ---
 
 ## How I build
 
-* **Correctness first, proven by tests.** Concurrency claims are checked against an oracle, failure handling against injected faults.
-* **Failure is a normal path.** Retries, duplicates, timeouts and outages are designed for, measured and reported, not left to chance.
-* **Numbers I can rerun.** Every project has a benchmark command and a committed results file.
-* **Runs on a laptop.** DynamoDB Local, embedded PostgreSQL, ElasticMQ, S3Mock and real Redis start inside the tests, so anyone can clone and verify.
+* **Profile first.** Optimizations target what Nsight or the profiler shows is actually slow, not what looks slow.
+* **Measure against the strongest baseline.** cuBLAS for GEMMs, FlashInfer for attention, vLLM's own backends end to end.
+* **Correctness before speed.** Every kernel has a PyTorch reference and tolerance-checked tests, including edge cases such as partition boundaries, GQA ratios and padded batches.
+* **Honest numbers.** Results come from committed benchmark scripts. Simulated results are labeled as simulated, and anything not yet measured on a GPU is marked that way.
 
 ---
 
@@ -133,18 +128,19 @@ Ask "who is this character again?" halfway through a book and get an answer that
 
 * [**Distributed Sharded Transaction Engine**](https://github.com/JayaChandraDadi/Distributed-Sharded-Transaction-Engine): banking transactions across shards and nodes, with gRPC communication, transaction routing and benchmarked workloads. `Python` `gRPC` `Protocol Buffers`
 * [**Byzantine Fault-Tolerant Consensus Engine**](https://github.com/JayaChandraDadi/Byzantine-Fault-Tolerant-Consensus-Engine): consensus that keeps working when some nodes misbehave, with simulated Byzantine nodes, quorum decisions and replication. `Python` `gRPC` `Protocol Buffers`
-* [**DealRoom**](https://github.com/JayaChandraDadi/dealroom): document analysis with source-grounded answers, built on FastAPI, local embeddings and semantic retrieval with a React front end. `FastAPI` `React` `TypeScript` `Ollama`
 
-Practice: [LeetCode](https://github.com/JayaChandraDadi/leetcode) (algorithms and data structures) · [Low-Level Design](https://github.com/JayaChandraDadi/LowLevelDesign) (object-oriented design and design patterns)
+Practice: [LeetCode](https://github.com/JayaChandraDadi/leetcode) (500+ problems solved)
 
-**Coursework:** Data Structures and Algorithms, Object-Oriented Design, Distributed Systems, Operating Systems, Database Systems, Cloud Computing, Big Data Systems, Machine Learning, Large Language Models
+**Coursework:** Computer Architecture, Operating Systems, Distributed Systems, Deep Learning, Large Language Models
+
+**Hackathons:** Harvard Rare Disease Hackathon · 5th Series AI Hackathon
 
 ---
 
 ## Connect
 
-I'm looking for software engineering roles building **backend and distributed systems for products people use every day**, especially audio, media and listening experiences.
+I'm looking for roles in **GPU computing, LLM inference and AI systems**: kernels, serving engines and the infrastructure that makes models fast and reliable in production.
 
-📧 [jayachandradadi2003@gmail.com](mailto:jayachandradadi2003@gmail.com)  
+📧 [jayachandra.dadi@gmail.com](mailto:jayachandra.dadi@gmail.com)  
 🔗 [LinkedIn](https://www.linkedin.com/in/jaya-chandra-dadi-0abab6278)  
 💻 [GitHub](https://github.com/JayaChandraDadi)
