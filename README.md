@@ -7,7 +7,7 @@ I work on the layer between a trained model and a fast, reliable service: **CUDA
 I hold an **M.S. in Data Science (Computer Science and Applied Mathematics) from Stony Brook University**. My recent work covers three levels of the inference stack: the kernels a decode step runs on, the router that decides which GPU replica serves a request, and reusing a small model's KV cache so a large model can skip most of its prefill.
 
 📍 Houston, Texas  
-📧 [jayachandra.dadi@gmail.com](mailto:jayachandra.dadi@gmail.com)  
+📧 [jayachandra.dadi@gmail.com](mailto:jayachandradadi00@gmail.com)  
 🔗 [LinkedIn](https://www.linkedin.com/in/jaya-chandra-dadi-0abab6278) · [LeetCode](https://leetcode.com/u/JayaChandraDadi)
 
 ---
